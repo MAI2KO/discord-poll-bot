@@ -1,0 +1,54 @@
+import { Client } from "discord.js";
+import { PollDatabase } from "./db";
+import { resetPoll } from "./polls";
+
+export class PollScheduler {
+  private timer: NodeJS.Timeout | null = null;
+  private running = false;
+
+  constructor(
+    private readonly client: Client,
+    private readonly db: PollDatabase
+  ) {}
+
+  start(): void {
+    void this.tick();
+    this.timer = setInterval(() => {
+      void this.tick();
+    }, 60_000);
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private async tick(): Promise<void> {
+    if (this.running) {
+      return;
+    }
+
+    this.running = true;
+    const now = new Date();
+
+    try {
+      for (const config of this.db.getDueConfigs(now)) {
+        const latest = this.db.getGuildConfig(config.guildId);
+        if (!latest?.nextPostAtUtc || latest.nextPostAtUtc > now.toISOString()) {
+          continue;
+        }
+
+        try {
+          await resetPoll(this.client, this.db, latest, { advanceSchedule: true });
+          console.log(`Posted scheduled poll for guild ${latest.guildId}.`);
+        } catch (error) {
+          console.error(`Failed to post scheduled poll for guild ${latest.guildId}:`, error);
+        }
+      }
+    } finally {
+      this.running = false;
+    }
+  }
+}
