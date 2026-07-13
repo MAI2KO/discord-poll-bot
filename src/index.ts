@@ -9,8 +9,12 @@ if (!token) {
   throw new Error("DISCORD_TOKEN is required.");
 }
 
-const databasePath = process.env.DATABASE_PATH ?? "./data/bot.sqlite";
-const db = new PollDatabase(databasePath);
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required.");
+}
+
+const db = new PollDatabase(databaseUrl);
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
@@ -37,10 +41,17 @@ process.on("SIGTERM", shutdown);
 function shutdown(): void {
   scheduler.stop();
   client.destroy();
-  process.exit(0);
+  void db.close().finally(() => {
+    process.exit(0);
+  });
 }
 
-client.login(token).catch((error) => {
-  console.error("Failed to log in:", error);
+async function main(): Promise<void> {
+  await db.initialize();
+  await client.login(token);
+}
+
+main().catch((error) => {
+  console.error("Failed to start bot:", error);
   process.exit(1);
 });

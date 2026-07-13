@@ -33,8 +33,8 @@ export interface PollConfigRow {
   frequency_hours: number;
   duration_hours: number;
   current_poll_message_id: string | null;
-  last_posted_at_utc: string | null;
-  next_post_at_utc: string | null;
-  created_at: string;
-  updated_at: string;
+  last_posted_at_utc: Date | string | null;
+  next_post_at_utc: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
 }

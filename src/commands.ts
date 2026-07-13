@@ -188,7 +188,7 @@ export async function handleCommand(interaction: ChatInputCommandInteraction, cl
 
 async function handleSetup(interaction: ChatInputCommandInteraction, db: PollDatabase): Promise<void> {
   const channel = interaction.options.getChannel("channel", true, [ChannelType.GuildText]);
-  const config = db.updateChannel(interaction.guildId!, channel.id);
+  const config = await db.updateChannel(interaction.guildId!, channel.id);
   await interaction.reply({
     content: `Poll channel set to <#${config.channelId}>. Next scheduled poll: ${formatDate(config.nextPostAtUtc)}.`,
     ephemeral: true
@@ -201,7 +201,7 @@ async function handleQuestion(interaction: ChatInputCommandInteraction, db: Poll
     throw new Error("Question cannot be blank.");
   }
 
-  db.updateQuestion(interaction.guildId!, question);
+  await db.updateQuestion(interaction.guildId!, question);
   await interaction.reply({ content: "Poll question updated. This affects the next poll.", ephemeral: true });
 }
 
@@ -211,7 +211,7 @@ async function handleOptions(interaction: ChatInputCommandInteraction, db: PollD
     .map((option) => option.trim());
 
   validateOptions(options);
-  db.updateOptions(interaction.guildId!, options);
+  await db.updateOptions(interaction.guildId!, options);
   await interaction.reply({ content: "Poll options updated. This affects the next poll.", ephemeral: true });
 }
 
@@ -221,7 +221,7 @@ async function handleTime(interaction: ChatInputCommandInteraction, db: PollData
     throw new Error("Poll time must be one of the listed UTC hour choices.");
   }
 
-  const config = db.updatePollTime(interaction.guildId!, hour);
+  const config = await db.updatePollTime(interaction.guildId!, hour);
   await interaction.reply({
     content: `Poll time set to ${hour.toString().padStart(2, "0")}:00 UTC. Next scheduled poll: ${formatDate(config.nextPostAtUtc)}.`,
     ephemeral: true
@@ -234,7 +234,7 @@ async function handleFrequency(interaction: ChatInputCommandInteraction, db: Pol
     throw new Error("Poll frequency must be one of the listed choices.");
   }
 
-  const config = db.updateFrequency(interaction.guildId!, frequency);
+  const config = await db.updateFrequency(interaction.guildId!, frequency);
   await interaction.reply({
     content: `Poll frequency set to every ${frequency} ${frequency === 1 ? "hour" : "hours"}. Next scheduled poll: ${formatDate(config.nextPostAtUtc)}.`,
     ephemeral: true
@@ -247,32 +247,32 @@ async function handleDuration(interaction: ChatInputCommandInteraction, db: Poll
     throw new Error("Poll duration must be one of the listed choices.");
   }
 
-  db.updateDuration(interaction.guildId!, duration);
+  await db.updateDuration(interaction.guildId!, duration);
   await interaction.reply({ content: `Poll duration set to ${duration} ${duration === 1 ? "hour" : "hours"}.`, ephemeral: true });
 }
 
 async function handleSetRole(interaction: ChatInputCommandInteraction, db: PollDatabase): Promise<void> {
   const role = interaction.options.getRole("role", true);
-  db.updateExpectedRole(interaction.guildId!, role.id);
+  await db.updateExpectedRole(interaction.guildId!, role.id);
   await interaction.reply({ content: `Expected voter role set to <@&${role.id}>.`, ephemeral: true });
 }
 
 async function handlePostNow(interaction: ChatInputCommandInteraction, client: Client, db: PollDatabase): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
-  const config = db.getOrCreateGuildConfig(interaction.guildId!);
+  const config = await db.getOrCreateGuildConfig(interaction.guildId!);
   const message = await resetPoll(client, db, config, { advanceSchedule: false });
   await interaction.editReply(`Posted a fresh poll: ${message.url}`);
 }
 
 async function handleDelete(interaction: ChatInputCommandInteraction, client: Client, db: PollDatabase): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
-  const config = db.getOrCreateGuildConfig(interaction.guildId!);
+  const config = await db.getOrCreateGuildConfig(interaction.guildId!);
   const deleted = await deleteSavedPoll(client, db, config);
   await interaction.editReply(deleted ? "Deleted the current poll and cleared the saved message ID." : "No current poll message was available to delete.");
 }
 
 async function handleStatus(interaction: ChatInputCommandInteraction, db: PollDatabase): Promise<void> {
-  const config = db.getOrCreateGuildConfig(interaction.guildId!);
+  const config = await db.getOrCreateGuildConfig(interaction.guildId!);
   const warning =
     config.durationHours > config.frequencyHours
       ? "\nWarning: poll duration is longer than poll frequency, so a poll may be deleted before Discord naturally closes it."
@@ -332,13 +332,13 @@ async function handleRemindMissing(interaction: ChatInputCommandInteraction, cli
 }
 
 async function handleClearTracking(interaction: ChatInputCommandInteraction, db: PollDatabase): Promise<void> {
-  const config = db.getOrCreateGuildConfig(interaction.guildId!);
+  const config = await db.getOrCreateGuildConfig(interaction.guildId!);
   if (!config.currentPollMessageId) {
     await interaction.reply({ content: "No current poll exists.", ephemeral: true });
     return;
   }
 
-  db.clearPollVotes(config.guildId, config.currentPollMessageId);
+  await db.clearPollVotes(config.guildId, config.currentPollMessageId);
   await interaction.reply({ content: "Cleared stored voter tracking for the current poll.", ephemeral: true });
 }
 
@@ -390,7 +390,7 @@ async function getMissingVoters(
     throw new Error("This command can only be used in a Discord server.");
   }
 
-  const config = db.getOrCreateGuildConfig(interaction.guildId!);
+  const config = await db.getOrCreateGuildConfig(interaction.guildId!);
   if (!config.currentPollMessageId) {
     throw new Error("No current poll exists.");
   }
@@ -406,7 +406,7 @@ async function getMissingVoters(
 
   const message = await fetchCurrentPollMessage(db, config, channel);
   const votes = await fetchNativePollVotes(message);
-  db.replacePollVotes(
+  await db.replacePollVotes(
     config.guildId,
     config.currentPollMessageId,
     votes.map((vote) => ({ userId: vote.userId, answerId: vote.answerId }))
@@ -459,8 +459,8 @@ async function fetchCurrentPollMessage(
     return message;
   } catch (error) {
     if (isUnknownMessageError(error)) {
-      db.clearPollVotes(config.guildId, config.currentPollMessageId!);
-      db.clearCurrentPoll(config.guildId);
+      await db.clearPollVotes(config.guildId, config.currentPollMessageId!);
+      await db.clearCurrentPoll(config.guildId);
       throw new Error("The saved current poll message was deleted. Cleared the saved current poll message ID.");
     }
 

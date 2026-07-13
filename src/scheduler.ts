@@ -34,8 +34,8 @@ export class PollScheduler {
     const now = new Date();
 
     try {
-      for (const config of this.db.getDueConfigs(now)) {
-        const latest = this.db.getGuildConfig(config.guildId);
+      for (const config of await this.db.getDueConfigs(now)) {
+        const latest = await this.db.getGuildConfig(config.guildId);
         if (!latest?.nextPostAtUtc || latest.nextPostAtUtc > now.toISOString()) {
           continue;
         }

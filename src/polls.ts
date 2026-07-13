@@ -30,7 +30,7 @@ export async function resetPoll(
 
   if (config.currentPollMessageId) {
     await deleteCurrentPoll(channel, config.currentPollMessageId);
-    db.clearPollVotes(config.guildId, config.currentPollMessageId);
+    await db.clearPollVotes(config.guildId, config.currentPollMessageId);
   }
 
   const message = await channel.send({
@@ -48,25 +48,25 @@ export async function resetPoll(
     options.advanceSchedule === false
       ? new Date(config.nextPostAtUtc ?? calculateNextPostAt(postedAt, config.pollTimeHourUtc))
       : addHours(postedAt, config.frequencyHours);
-  db.markPollPosted(config.guildId, message.id, postedAt, nextPostAt);
+  await db.markPollPosted(config.guildId, message.id, postedAt, nextPostAt);
   return message as Message<true>;
 }
 
 export async function deleteSavedPoll(client: Client, db: PollDatabase, config: PollConfig): Promise<boolean> {
   if (!config.channelId || !config.currentPollMessageId) {
-    db.clearCurrentPoll(config.guildId);
+    await db.clearCurrentPoll(config.guildId);
     return false;
   }
 
   const channel = await fetchTextChannel(client, config.channelId);
   if (!channel) {
-    db.clearCurrentPoll(config.guildId);
+    await db.clearCurrentPoll(config.guildId);
     return false;
   }
 
   const deleted = await deleteCurrentPoll(channel, config.currentPollMessageId);
-  db.clearPollVotes(config.guildId, config.currentPollMessageId);
-  db.clearCurrentPoll(config.guildId);
+  await db.clearPollVotes(config.guildId, config.currentPollMessageId);
+  await db.clearCurrentPoll(config.guildId);
   return deleted;
 }
 

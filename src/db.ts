@@ -1,6 +1,4 @@
-import Database from "better-sqlite3";
-import fs from "node:fs";
-import path from "node:path";
+import { Pool, PoolClient } from "pg";
 import {
   DEFAULT_DURATION_HOURS,
   DEFAULT_FREQUENCY_HOURS,
@@ -11,221 +9,236 @@ import {
   PollConfigRow
 } from "./types";
 
-export class PollDatabase {
-  private readonly db: Database.Database;
+type ConfigPatch = Partial<{
+  channel_id: string | null;
+  expected_role_id: string | null;
+  question: string;
+  options_json: string;
+  poll_time_hour_utc: number;
+  frequency_hours: number;
+  duration_hours: number;
+  current_poll_message_id: string | null;
+  last_posted_at_utc: Date | string | null;
+  next_post_at_utc: Date | string | null;
+}>;
 
-  constructor(databasePath: string) {
-    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-    this.db = new Database(databasePath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("foreign_keys = ON");
-    this.migrate();
+export class PollDatabase {
+  private readonly pool: Pool;
+
+  constructor(databaseUrl: string) {
+    this.pool = new Pool({
+      connectionString: databaseUrl
+    });
   }
 
-  getOrCreateGuildConfig(guildId: string): PollConfig {
-    const existing = this.getGuildConfig(guildId);
+  async initialize(): Promise<void> {
+    await this.migrate();
+  }
+
+  async close(): Promise<void> {
+    await this.pool.end();
+  }
+
+  async getOrCreateGuildConfig(guildId: string): Promise<PollConfig> {
+    const existing = await this.getGuildConfig(guildId);
     if (existing) {
       return existing;
     }
 
-    const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO poll_configs (
-          guild_id, channel_id, expected_role_id, question, options_json, poll_time_hour_utc,
-          frequency_hours, duration_hours, current_poll_message_id,
-          last_posted_at_utc, next_post_at_utc, created_at, updated_at
-        ) VALUES (
-          @guildId, NULL, NULL, @question, @optionsJson, @pollTimeHourUtc,
-          @frequencyHours, @durationHours, NULL, NULL, NULL, @now, @now
-        )`
+    await this.pool.query(
+      `INSERT INTO poll_configs (
+        guild_id, channel_id, expected_role_id, question, options_json, poll_time_hour_utc,
+        frequency_hours, duration_hours, current_poll_message_id,
+        last_posted_at_utc, next_post_at_utc
+      ) VALUES (
+        $1, NULL, NULL, $2, $3, $4, $5, $6, NULL, NULL, NULL
       )
-      .run({
+      ON CONFLICT (guild_id) DO NOTHING`,
+      [
         guildId,
-        question: DEFAULT_QUESTION,
-        optionsJson: JSON.stringify(DEFAULT_OPTIONS),
-        pollTimeHourUtc: DEFAULT_POLL_TIME_HOUR_UTC,
-        frequencyHours: DEFAULT_FREQUENCY_HOURS,
-        durationHours: DEFAULT_DURATION_HOURS,
-        now
-      });
+        DEFAULT_QUESTION,
+        JSON.stringify(DEFAULT_OPTIONS),
+        DEFAULT_POLL_TIME_HOUR_UTC,
+        DEFAULT_FREQUENCY_HOURS,
+        DEFAULT_DURATION_HOURS
+      ]
+    );
 
-    return this.getOrCreateGuildConfig(guildId);
+    const created = await this.getGuildConfig(guildId);
+    if (!created) {
+      throw new Error("Failed to create poll configuration.");
+    }
+
+    return created;
   }
 
-  getGuildConfig(guildId: string): PollConfig | null {
-    const row = this.db
-      .prepare("SELECT * FROM poll_configs WHERE guild_id = ?")
-      .get(guildId) as PollConfigRow | undefined;
-
-    return row ? rowToConfig(row) : null;
+  async getGuildConfig(guildId: string): Promise<PollConfig | null> {
+    const result = await this.pool.query<PollConfigRow>("SELECT * FROM poll_configs WHERE guild_id = $1", [guildId]);
+    return result.rows[0] ? rowToConfig(result.rows[0]) : null;
   }
 
-  getDueConfigs(now: Date): PollConfig[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM poll_configs
-         WHERE channel_id IS NOT NULL
-           AND next_post_at_utc IS NOT NULL
-           AND next_post_at_utc <= ?
-         ORDER BY next_post_at_utc ASC`
-      )
-      .all(now.toISOString()) as PollConfigRow[];
+  async getDueConfigs(now: Date): Promise<PollConfig[]> {
+    const result = await this.pool.query<PollConfigRow>(
+      `SELECT * FROM poll_configs
+       WHERE channel_id IS NOT NULL
+         AND next_post_at_utc IS NOT NULL
+         AND next_post_at_utc <= $1
+       ORDER BY next_post_at_utc ASC`,
+      [now]
+    );
 
-    return rows.map(rowToConfig);
+    return result.rows.map(rowToConfig);
   }
 
-  getAllConfigs(): PollConfig[] {
-    const rows = this.db.prepare("SELECT * FROM poll_configs ORDER BY guild_id ASC").all() as PollConfigRow[];
-    return rows.map(rowToConfig);
-  }
-
-  updateChannel(guildId: string, channelId: string): PollConfig {
-    const config = this.getOrCreateGuildConfig(guildId);
+  async updateChannel(guildId: string, channelId: string): Promise<PollConfig> {
+    const config = await this.getOrCreateGuildConfig(guildId);
     const nextPostAtUtc = config.nextPostAtUtc ?? calculateNextPostAt(new Date(), config.pollTimeHourUtc).toISOString();
-    this.patchConfig(guildId, {
+    await this.patchConfig(guildId, {
       channel_id: channelId,
       next_post_at_utc: nextPostAtUtc
     });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  updateExpectedRole(guildId: string, roleId: string): PollConfig {
-    this.getOrCreateGuildConfig(guildId);
-    this.patchConfig(guildId, { expected_role_id: roleId });
+  async updateExpectedRole(guildId: string, roleId: string): Promise<PollConfig> {
+    await this.getOrCreateGuildConfig(guildId);
+    await this.patchConfig(guildId, { expected_role_id: roleId });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  updateQuestion(guildId: string, question: string): PollConfig {
-    this.getOrCreateGuildConfig(guildId);
-    this.patchConfig(guildId, { question });
+  async updateQuestion(guildId: string, question: string): Promise<PollConfig> {
+    await this.getOrCreateGuildConfig(guildId);
+    await this.patchConfig(guildId, { question });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  updateOptions(guildId: string, options: string[]): PollConfig {
-    this.getOrCreateGuildConfig(guildId);
-    this.patchConfig(guildId, { options_json: JSON.stringify(options) });
+  async updateOptions(guildId: string, options: string[]): Promise<PollConfig> {
+    await this.getOrCreateGuildConfig(guildId);
+    await this.patchConfig(guildId, { options_json: JSON.stringify(options) });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  updatePollTime(guildId: string, pollTimeHourUtc: number): PollConfig {
-    this.getOrCreateGuildConfig(guildId);
-    this.patchConfig(guildId, {
+  async updatePollTime(guildId: string, pollTimeHourUtc: number): Promise<PollConfig> {
+    await this.getOrCreateGuildConfig(guildId);
+    await this.patchConfig(guildId, {
       poll_time_hour_utc: pollTimeHourUtc,
       next_post_at_utc: calculateNextPostAt(new Date(), pollTimeHourUtc).toISOString()
     });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  updateFrequency(guildId: string, frequencyHours: number): PollConfig {
-    const config = this.getOrCreateGuildConfig(guildId);
+  async updateFrequency(guildId: string, frequencyHours: number): Promise<PollConfig> {
+    const config = await this.getOrCreateGuildConfig(guildId);
     const anchor = config.lastPostedAtUtc ? new Date(config.lastPostedAtUtc) : new Date();
     const nextPostAtUtc = addHours(anchor, frequencyHours);
-    this.patchConfig(guildId, {
+    await this.patchConfig(guildId, {
       frequency_hours: frequencyHours,
       next_post_at_utc: nextPostAtUtc.toISOString()
     });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  updateDuration(guildId: string, durationHours: number): PollConfig {
-    this.getOrCreateGuildConfig(guildId);
-    this.patchConfig(guildId, { duration_hours: durationHours });
+  async updateDuration(guildId: string, durationHours: number): Promise<PollConfig> {
+    await this.getOrCreateGuildConfig(guildId);
+    await this.patchConfig(guildId, { duration_hours: durationHours });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  markPollPosted(guildId: string, messageId: string, postedAt: Date, nextPostAt: Date): PollConfig {
-    this.patchConfig(guildId, {
+  async markPollPosted(guildId: string, messageId: string, postedAt: Date, nextPostAt: Date): Promise<PollConfig> {
+    await this.patchConfig(guildId, {
       current_poll_message_id: messageId,
-      last_posted_at_utc: postedAt.toISOString(),
-      next_post_at_utc: nextPostAt.toISOString()
+      last_posted_at_utc: postedAt,
+      next_post_at_utc: nextPostAt
     });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  clearCurrentPoll(guildId: string): PollConfig {
-    this.getOrCreateGuildConfig(guildId);
-    this.patchConfig(guildId, { current_poll_message_id: null });
+  async clearCurrentPoll(guildId: string): Promise<PollConfig> {
+    await this.getOrCreateGuildConfig(guildId);
+    await this.patchConfig(guildId, { current_poll_message_id: null });
     return this.getOrCreateGuildConfig(guildId);
   }
 
-  clearPollVotes(guildId: string, pollMessageId: string): void {
-    this.db.prepare("DELETE FROM poll_votes WHERE guild_id = ? AND poll_message_id = ?").run(guildId, pollMessageId);
+  async clearPollVotes(guildId: string, pollMessageId: string): Promise<void> {
+    await this.pool.query("DELETE FROM poll_votes WHERE guild_id = $1 AND poll_message_id = $2", [guildId, pollMessageId]);
   }
 
-  replacePollVotes(guildId: string, pollMessageId: string, votes: Array<{ userId: string; answerId: number }>): void {
-    const now = new Date().toISOString();
-    const replace = this.db.transaction(() => {
-      this.clearPollVotes(guildId, pollMessageId);
-      const insert = this.db.prepare(
-        `INSERT INTO poll_votes (
-          guild_id, poll_message_id, user_id, answer_id, created_at, updated_at
-        ) VALUES (
-          @guildId, @pollMessageId, @userId, @answerId, @now, @now
-        )
-        ON CONFLICT(guild_id, poll_message_id, user_id)
-        DO UPDATE SET answer_id = excluded.answer_id, updated_at = excluded.updated_at`
-      );
+  async replacePollVotes(guildId: string, pollMessageId: string, votes: Array<{ userId: string; answerId: number }>): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM poll_votes WHERE guild_id = $1 AND poll_message_id = $2", [guildId, pollMessageId]);
 
       for (const vote of votes) {
-        insert.run({ guildId, pollMessageId, userId: vote.userId, answerId: vote.answerId, now });
+        await client.query(
+          `INSERT INTO poll_votes (
+            guild_id, poll_message_id, user_id, answer_id
+          ) VALUES (
+            $1, $2, $3, $4
+          )
+          ON CONFLICT (guild_id, poll_message_id, user_id)
+          DO UPDATE SET answer_id = EXCLUDED.answer_id, updated_at = NOW()`,
+          [guildId, pollMessageId, vote.userId, vote.answerId]
+        );
       }
-    });
 
-    replace();
+      await client.query("COMMIT");
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
-  private patchConfig(guildId: string, values: Record<string, string | number | null>): void {
-    const assignments = Object.keys(values).map((key) => `${key} = @${key}`);
-    const updatedAt = new Date().toISOString();
-    this.db
-      .prepare(
-        `UPDATE poll_configs
-         SET ${assignments.join(", ")}, updated_at = @updated_at
-         WHERE guild_id = @guild_id`
-      )
-      .run({ ...values, updated_at: updatedAt, guild_id: guildId });
-  }
-
-  private migrate(): void {
-    this.db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS poll_configs (
-          guild_id TEXT PRIMARY KEY,
-          channel_id TEXT,
-          expected_role_id TEXT,
-          question TEXT NOT NULL,
-          options_json TEXT NOT NULL,
-          poll_time_hour_utc INTEGER NOT NULL,
-          frequency_hours INTEGER NOT NULL,
-          duration_hours INTEGER NOT NULL,
-          current_poll_message_id TEXT,
-          last_posted_at_utc TEXT,
-          next_post_at_utc TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )`
-      )
-      .run();
-
-    const columns = this.db.prepare("PRAGMA table_info(poll_configs)").all() as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === "expected_role_id")) {
-      this.db.prepare("ALTER TABLE poll_configs ADD COLUMN expected_role_id TEXT").run();
+  private async patchConfig(guildId: string, values: ConfigPatch): Promise<void> {
+    const entries = Object.entries(values);
+    if (entries.length === 0) {
+      return;
     }
 
-    this.db
-      .prepare(
-        `CREATE TABLE IF NOT EXISTS poll_votes (
-          guild_id TEXT NOT NULL,
-          poll_message_id TEXT NOT NULL,
-          user_id TEXT NOT NULL,
-          answer_id INTEGER NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          UNIQUE(guild_id, poll_message_id, user_id)
-        )`
-      )
-      .run();
+    const assignments = entries.map(([key], index) => `${key} = $${index + 2}`);
+    const params = [guildId, ...entries.map(([, value]) => value)];
+    await this.pool.query(
+      `UPDATE poll_configs
+       SET ${assignments.join(", ")}, updated_at = NOW()
+       WHERE guild_id = $1`,
+      params
+    );
+  }
+
+  private async migrate(): Promise<void> {
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS poll_configs (
+        guild_id TEXT PRIMARY KEY,
+        channel_id TEXT,
+        question TEXT NOT NULL,
+        options_json TEXT NOT NULL,
+        poll_time_hour_utc INTEGER NOT NULL,
+        frequency_hours INTEGER NOT NULL,
+        duration_hours INTEGER NOT NULL,
+        current_poll_message_id TEXT,
+        expected_role_id TEXT,
+        last_posted_at_utc TIMESTAMPTZ,
+        next_post_at_utc TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )`
+    );
+
+    await this.pool.query("ALTER TABLE poll_configs ADD COLUMN IF NOT EXISTS expected_role_id TEXT");
+
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS poll_votes (
+        guild_id TEXT NOT NULL,
+        poll_message_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        answer_id INTEGER,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (guild_id, poll_message_id, user_id)
+      )`
+    );
   }
 }
 
@@ -241,6 +254,14 @@ export function addHours(date: Date, hours: number): Date {
   return new Date(date.getTime() + hours * 60 * 60 * 1000);
 }
 
+async function rollback(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch (error) {
+    console.error("Failed to roll back database transaction:", error);
+  }
+}
+
 function rowToConfig(row: PollConfigRow): PollConfig {
   return {
     guildId: row.guild_id,
@@ -252,11 +273,23 @@ function rowToConfig(row: PollConfigRow): PollConfig {
     frequencyHours: row.frequency_hours,
     durationHours: row.duration_hours,
     currentPollMessageId: row.current_poll_message_id,
-    lastPostedAtUtc: row.last_posted_at_utc,
-    nextPostAtUtc: row.next_post_at_utc,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
+    lastPostedAtUtc: formatTimestamp(row.last_posted_at_utc),
+    nextPostAtUtc: formatTimestamp(row.next_post_at_utc),
+    createdAt: formatRequiredTimestamp(row.created_at),
+    updatedAt: formatRequiredTimestamp(row.updated_at)
   };
+}
+
+function formatTimestamp(value: Date | string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+function formatRequiredTimestamp(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
 function parseOptions(optionsJson: string): string[] {

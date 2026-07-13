@@ -49,7 +49,7 @@ cp .env.example .env
 ```env
 DISCORD_TOKEN=your_bot_token
 CLIENT_ID=your_application_id
-DATABASE_PATH=./data/bot.sqlite
+DATABASE_URL=your_postgres_connection_url
 ```
 
 ## Install And Build
@@ -153,57 +153,18 @@ Tracking rows are scrubbed when a poll is deleted with `/poll-delete`, when `/po
 
 If member fetching fails, enable Server Members Intent in the Discord Developer Portal and make sure the bot can access the server member list.
 
-## Deploy On A VPS
+## Deploy On Railway
 
-1. Install Node.js 20 or newer on the server.
-2. Clone or copy this project to the VPS.
-3. Create `.env` with `DISCORD_TOKEN`, `CLIENT_ID`, and `DATABASE_PATH`.
-4. Install and build:
+Railway deployments require PostgreSQL so poll configuration survives restarts and redeploys.
 
-```bash
-npm install
-npm run build
-npm run register-commands
-```
+1. Add a PostgreSQL service to the same Railway project.
+2. Open the bot service.
+3. Go to Variables.
+4. Add `DATABASE_URL` using the Postgres `DATABASE_URL` reference.
+5. Keep `DISCORD_TOKEN` and `CLIENT_ID` on the bot service.
+6. Redeploy the bot.
 
-5. Run the bot with a process manager such as systemd or pm2.
-
-Example pm2 flow:
-
-```bash
-npm install -g pm2
-pm2 start dist/index.js --name discord-poll-bot
-pm2 save
-pm2 startup
-```
-
-Example systemd service:
-
-```ini
-[Unit]
-Description=Discord Poll Bot
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/ubuntu/discord-poll-bot
-ExecStart=/usr/bin/node dist/index.js
-Restart=always
-RestartSec=10
-Environment=NODE_ENV=production
-
-[Install]
-WantedBy=multi-user.target
-```
-
-After creating the service file:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable discord-poll-bot
-sudo systemctl start discord-poll-bot
-sudo systemctl status discord-poll-bot
-```
+The bot creates the `poll_configs` and `poll_votes` tables automatically on startup.
 
 ## Scheduling
 
