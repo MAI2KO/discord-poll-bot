@@ -14,6 +14,7 @@ The bot deletes the previous poll before posting a fresh one. It uses Discord na
   - Read Message History
   - Manage Messages
   - Use Application Commands
+- Server Members Intent may be needed for role member fetching. Enable it in the Discord Developer Portal if `/poll-missing` cannot fetch role members.
 
 ## Create The Discord Application
 
@@ -22,6 +23,7 @@ The bot deletes the previous poll before posting a fresh one. It uses Discord na
 3. Go to Bot and add a bot user.
 4. Copy the bot token. Put it in `.env` as `DISCORD_TOKEN`.
 5. Go to OAuth2 and copy the Application ID. Put it in `.env` as `CLIENT_ID`.
+6. If missing-voter checks cannot fetch role members, go to Bot and enable Server Members Intent.
 
 ## Invite The Bot
 
@@ -93,7 +95,10 @@ Run these in Discord after commands are registered:
 /poll-time time:"08:00 UTC"
 /poll-frequency frequency:"Every 24 hours"
 /poll-duration duration:"24 hours"
+/poll-set-role role:@Task Team
 /poll-post-now
+/poll-missing
+/poll-remind-missing
 ```
 
 ## Commands
@@ -104,9 +109,13 @@ Run these in Discord after commands are registered:
 - `/poll-time` sets the UTC hour when the recurring cycle starts.
 - `/poll-frequency` sets how often the current poll is replaced.
 - `/poll-duration` sets how long Discord keeps each poll open.
+- `/poll-set-role` sets the role whose non-bot members are expected to vote.
 - `/poll-post-now` deletes the previous poll and posts a fresh one immediately.
 - `/poll-delete` deletes the current poll and clears the saved message ID.
 - `/poll-status` shows the saved config, next post time, and any duration/frequency warning.
+- `/poll-missing` privately shows total expected voters, total voted, total missing, and the missing member mentions.
+- `/poll-remind-missing` posts a public reminder in the poll channel tagging only missing voters.
+- `/poll-clear-tracking` clears stored voter tracking rows for the current poll.
 
 All commands are admin-only. Users need Manage Guild or Administrator permission.
 
@@ -120,6 +129,29 @@ All commands are admin-only. Users need Manage Guild or Administrator permission
 - Polls are single-choice only.
 
 Changing settings affects the next poll. Discord native polls cannot be edited after creation, so use `/poll-post-now` to reset immediately with the latest settings.
+
+## Missing Voter Tracking
+
+Set the expected voter role before checking missing voters:
+
+```text
+/poll-set-role role:@Task Team
+```
+
+The bot checks the current native Discord poll, fetches voters for each poll answer through Discord's native poll API, and compares those users with non-bot members of the configured role.
+
+```text
+/poll-missing
+/poll-remind-missing
+```
+
+`/poll-missing` replies ephemerally to the admin. `/poll-remind-missing` posts a public reminder in the poll channel only when someone is missing. It does not run automatically.
+
+Privacy: the bot only checks who has not voted. It does not publicly show vote choices, announce winners, keep old missing-voter lists, or keep long-term voting history.
+
+Tracking rows are scrubbed when a poll is deleted with `/poll-delete`, when `/poll-post-now` replaces the active poll, and when the scheduled reset replaces the active poll. `/poll-clear-tracking` can also clear stored tracking for the current poll manually.
+
+If member fetching fails, enable Server Members Intent in the Discord Developer Portal and make sure the bot can access the server member list.
 
 ## Deploy On A VPS
 

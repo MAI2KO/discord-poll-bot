@@ -32,11 +32,11 @@ export class PollDatabase {
     this.db
       .prepare(
         `INSERT INTO poll_configs (
-          guild_id, channel_id, question, options_json, poll_time_hour_utc,
+          guild_id, channel_id, expected_role_id, question, options_json, poll_time_hour_utc,
           frequency_hours, duration_hours, current_poll_message_id,
           last_posted_at_utc, next_post_at_utc, created_at, updated_at
         ) VALUES (
-          @guildId, NULL, @question, @optionsJson, @pollTimeHourUtc,
+          @guildId, NULL, NULL, @question, @optionsJson, @pollTimeHourUtc,
           @frequencyHours, @durationHours, NULL, NULL, NULL, @now, @now
         )`
       )
@@ -87,6 +87,12 @@ export class PollDatabase {
       channel_id: channelId,
       next_post_at_utc: nextPostAtUtc
     });
+    return this.getOrCreateGuildConfig(guildId);
+  }
+
+  updateExpectedRole(guildId: string, roleId: string): PollConfig {
+    this.getOrCreateGuildConfig(guildId);
+    this.patchConfig(guildId, { expected_role_id: roleId });
     return this.getOrCreateGuildConfig(guildId);
   }
 
@@ -143,6 +149,32 @@ export class PollDatabase {
     return this.getOrCreateGuildConfig(guildId);
   }
 
+  clearPollVotes(guildId: string, pollMessageId: string): void {
+    this.db.prepare("DELETE FROM poll_votes WHERE guild_id = ? AND poll_message_id = ?").run(guildId, pollMessageId);
+  }
+
+  replacePollVotes(guildId: string, pollMessageId: string, votes: Array<{ userId: string; answerId: number }>): void {
+    const now = new Date().toISOString();
+    const replace = this.db.transaction(() => {
+      this.clearPollVotes(guildId, pollMessageId);
+      const insert = this.db.prepare(
+        `INSERT INTO poll_votes (
+          guild_id, poll_message_id, user_id, answer_id, created_at, updated_at
+        ) VALUES (
+          @guildId, @pollMessageId, @userId, @answerId, @now, @now
+        )
+        ON CONFLICT(guild_id, poll_message_id, user_id)
+        DO UPDATE SET answer_id = excluded.answer_id, updated_at = excluded.updated_at`
+      );
+
+      for (const vote of votes) {
+        insert.run({ guildId, pollMessageId, userId: vote.userId, answerId: vote.answerId, now });
+      }
+    });
+
+    replace();
+  }
+
   private patchConfig(guildId: string, values: Record<string, string | number | null>): void {
     const assignments = Object.keys(values).map((key) => `${key} = @${key}`);
     const updatedAt = new Date().toISOString();
@@ -161,6 +193,7 @@ export class PollDatabase {
         `CREATE TABLE IF NOT EXISTS poll_configs (
           guild_id TEXT PRIMARY KEY,
           channel_id TEXT,
+          expected_role_id TEXT,
           question TEXT NOT NULL,
           options_json TEXT NOT NULL,
           poll_time_hour_utc INTEGER NOT NULL,
@@ -171,6 +204,25 @@ export class PollDatabase {
           next_post_at_utc TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
+        )`
+      )
+      .run();
+
+    const columns = this.db.prepare("PRAGMA table_info(poll_configs)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "expected_role_id")) {
+      this.db.prepare("ALTER TABLE poll_configs ADD COLUMN expected_role_id TEXT").run();
+    }
+
+    this.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS poll_votes (
+          guild_id TEXT NOT NULL,
+          poll_message_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          answer_id INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(guild_id, poll_message_id, user_id)
         )`
       )
       .run();
@@ -193,6 +245,7 @@ function rowToConfig(row: PollConfigRow): PollConfig {
   return {
     guildId: row.guild_id,
     channelId: row.channel_id,
+    expectedRoleId: row.expected_role_id,
     question: row.question,
     options: parseOptions(row.options_json),
     pollTimeHourUtc: row.poll_time_hour_utc,

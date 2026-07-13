@@ -28,7 +28,10 @@ export async function resetPoll(
     throw new Error("Configured channel was not found or is not a text channel.");
   }
 
-  await deleteCurrentPoll(channel, config.currentPollMessageId);
+  if (config.currentPollMessageId) {
+    await deleteCurrentPoll(channel, config.currentPollMessageId);
+    db.clearPollVotes(config.guildId, config.currentPollMessageId);
+  }
 
   const message = await channel.send({
     poll: {
@@ -62,6 +65,7 @@ export async function deleteSavedPoll(client: Client, db: PollDatabase, config: 
   }
 
   const deleted = await deleteCurrentPoll(channel, config.currentPollMessageId);
+  db.clearPollVotes(config.guildId, config.currentPollMessageId);
   db.clearCurrentPoll(config.guildId);
   return deleted;
 }

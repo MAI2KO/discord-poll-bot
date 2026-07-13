@@ -10,6 +10,7 @@ export const DURATION_CHOICES = FREQUENCY_CHOICES;
 export interface PollConfig {
   guildId: string;
   channelId: string | null;
+  expectedRoleId: string | null;
   question: string;
   options: string[];
   pollTimeHourUtc: number;
@@ -25,6 +26,7 @@ export interface PollConfig {
 export interface PollConfigRow {
   guild_id: string;
   channel_id: string | null;
+  expected_role_id: string | null;
   question: string;
   options_json: string;
   poll_time_hour_utc: number;

@@ -13,7 +13,7 @@ const databasePath = process.env.DATABASE_PATH ?? "./data/bot.sqlite";
 const db = new PollDatabase(databasePath);
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
 const scheduler = new PollScheduler(client, db);

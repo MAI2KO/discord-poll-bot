@@ -3,14 +3,16 @@ import {
   ChannelType,
   ChatInputCommandInteraction,
   Client,
+  Message,
   PermissionFlagsBits,
+  Role,
   REST,
   Routes,
   SlashCommandBuilder
 } from "discord.js";
 import { calculateNextPostAt, PollDatabase } from "./db";
-import { deleteSavedPoll, resetPoll } from "./polls";
-import { DURATION_CHOICES, FREQUENCY_CHOICES } from "./types";
+import { deleteSavedPoll, fetchTextChannel, resetPoll } from "./polls";
+import { DURATION_CHOICES, FREQUENCY_CHOICES, PollConfig } from "./types";
 
 const timeChoices = Array.from({ length: 24 }, (_, hour) => ({
   name: `${hour.toString().padStart(2, "0")}:00 UTC`,
@@ -72,6 +74,13 @@ export const slashCommands = [
       option.setName("duration").setDescription("Native Discord poll duration.").addChoices(...durationChoices).setRequired(true)
     ),
   new SlashCommandBuilder()
+    .setName("poll-set-role")
+    .setDescription("Set the role whose members are expected to vote.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addRoleOption((option) =>
+      option.setName("role").setDescription("The Discord role expected to vote in each poll.").setRequired(true)
+    ),
+  new SlashCommandBuilder()
     .setName("poll-post-now")
     .setDescription("Delete the current poll and post a fresh one now.")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
@@ -82,6 +91,18 @@ export const slashCommands = [
   new SlashCommandBuilder()
     .setName("poll-status")
     .setDescription("Show the current recurring poll configuration.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder()
+    .setName("poll-missing")
+    .setDescription("Show expected role members who have not voted in the current poll.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder()
+    .setName("poll-remind-missing")
+    .setDescription("Post a reminder tagging expected role members who have not voted.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder()
+    .setName("poll-clear-tracking")
+    .setDescription("Clear stored voter tracking for the current poll.")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
 ].map((command) => command.toJSON());
 
@@ -130,6 +151,9 @@ export async function handleCommand(interaction: ChatInputCommandInteraction, cl
       case "poll-duration":
         await handleDuration(interaction, db);
         break;
+      case "poll-set-role":
+        await handleSetRole(interaction, db);
+        break;
       case "poll-post-now":
         await handlePostNow(interaction, client, db);
         break;
@@ -138,6 +162,15 @@ export async function handleCommand(interaction: ChatInputCommandInteraction, cl
         break;
       case "poll-status":
         await handleStatus(interaction, db);
+        break;
+      case "poll-missing":
+        await handleMissing(interaction, client, db);
+        break;
+      case "poll-remind-missing":
+        await handleRemindMissing(interaction, client, db);
+        break;
+      case "poll-clear-tracking":
+        await handleClearTracking(interaction, db);
         break;
       default:
         await interaction.reply({ content: "Unknown command.", ephemeral: true });
@@ -218,6 +251,12 @@ async function handleDuration(interaction: ChatInputCommandInteraction, db: Poll
   await interaction.reply({ content: `Poll duration set to ${duration} ${duration === 1 ? "hour" : "hours"}.`, ephemeral: true });
 }
 
+async function handleSetRole(interaction: ChatInputCommandInteraction, db: PollDatabase): Promise<void> {
+  const role = interaction.options.getRole("role", true);
+  db.updateExpectedRole(interaction.guildId!, role.id);
+  await interaction.reply({ content: `Expected voter role set to <@&${role.id}>.`, ephemeral: true });
+}
+
 async function handlePostNow(interaction: ChatInputCommandInteraction, client: Client, db: PollDatabase): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
   const config = db.getOrCreateGuildConfig(interaction.guildId!);
@@ -241,6 +280,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction, db: PollDa
 
   const lines = [
     `Channel: ${config.channelId ? `<#${config.channelId}>` : "not configured"}`,
+    `Expected voter role: ${config.expectedRoleId ? `<@&${config.expectedRoleId}>` : "Not set"}`,
     `Question: ${config.question}`,
     `Options: ${config.options.join(", ")}`,
     `Poll time UTC: ${config.pollTimeHourUtc.toString().padStart(2, "0")}:00`,
@@ -251,6 +291,55 @@ async function handleStatus(interaction: ChatInputCommandInteraction, db: PollDa
   ];
 
   await interaction.reply({ content: lines.join("\n"), ephemeral: true });
+}
+
+async function handleMissing(interaction: ChatInputCommandInteraction, client: Client, db: PollDatabase): Promise<void> {
+  await interaction.deferReply({ ephemeral: true });
+  const result = await getMissingVoters(interaction, client, db);
+  const missingMentions = result.missingMembers.map((member) => member.toString());
+  const missingLine = formatMentionList(missingMentions, "Missing members");
+
+  await interaction.editReply(
+    [
+      `Total expected voters: ${result.expectedCount}`,
+      `Total voted: ${result.votedCount}`,
+      `Total missing: ${result.missingMembers.size}`,
+      missingLine
+    ].join("\n")
+  );
+}
+
+async function handleRemindMissing(interaction: ChatInputCommandInteraction, client: Client, db: PollDatabase): Promise<void> {
+  await interaction.deferReply({ ephemeral: true });
+  const result = await getMissingVoters(interaction, client, db);
+  if (result.missingMembers.size === 0) {
+    await interaction.editReply("Everyone has voted.");
+    return;
+  }
+
+  const mentions = result.missingMembers.map((member) => member.toString());
+  const userIds = result.missingMembers.map((member) => member.id);
+  const chunks = chunkReminderMentions(mentions);
+  for (const chunk of chunks) {
+    await result.channel.send({ content: chunk, allowedMentions: { users: userIds } });
+  }
+
+  await interaction.editReply(
+    chunks.length === 1
+      ? `Posted a reminder for ${result.missingMembers.size} missing ${result.missingMembers.size === 1 ? "voter" : "voters"}.`
+      : `Posted ${chunks.length} reminder messages for ${result.missingMembers.size} missing voters.`
+  );
+}
+
+async function handleClearTracking(interaction: ChatInputCommandInteraction, db: PollDatabase): Promise<void> {
+  const config = db.getOrCreateGuildConfig(interaction.guildId!);
+  if (!config.currentPollMessageId) {
+    await interaction.reply({ content: "No current poll exists.", ephemeral: true });
+    return;
+  }
+
+  db.clearPollVotes(config.guildId, config.currentPollMessageId);
+  await interaction.reply({ content: "Cleared stored voter tracking for the current poll.", ephemeral: true });
 }
 
 function validateOptions(options: string[]): void {
@@ -283,6 +372,191 @@ function isAdminInteraction(interaction: ChatInputCommandInteraction): boolean {
 
 function formatDate(value: string | null): string {
   return value ? `${value} UTC` : "not scheduled";
+}
+
+interface MissingVoterResult {
+  channel: NonNullable<Awaited<ReturnType<typeof fetchTextChannel>>>;
+  expectedCount: number;
+  votedCount: number;
+  missingMembers: Role["members"];
+}
+
+async function getMissingVoters(
+  interaction: ChatInputCommandInteraction,
+  client: Client,
+  db: PollDatabase
+): Promise<MissingVoterResult> {
+  if (!interaction.guild) {
+    throw new Error("This command can only be used in a Discord server.");
+  }
+
+  const config = db.getOrCreateGuildConfig(interaction.guildId!);
+  if (!config.currentPollMessageId) {
+    throw new Error("No current poll exists.");
+  }
+
+  if (!config.expectedRoleId) {
+    throw new Error("No expected voter role is configured. Run /poll-set-role first.");
+  }
+
+  const channel = await fetchTextChannel(client, config.channelId ?? "");
+  if (!channel) {
+    throw new Error("Configured poll channel was not found or the bot lacks access to it.");
+  }
+
+  const message = await fetchCurrentPollMessage(db, config, channel);
+  const votes = await fetchNativePollVotes(message);
+  db.replacePollVotes(
+    config.guildId,
+    config.currentPollMessageId,
+    votes.map((vote) => ({ userId: vote.userId, answerId: vote.answerId }))
+  );
+
+  let role: Role | null;
+  try {
+    role = await interaction.guild.roles.fetch(config.expectedRoleId);
+  } catch (error) {
+    console.error(`Failed to fetch expected role ${config.expectedRoleId} in guild ${config.guildId}:`, error);
+    throw new Error("Could not fetch the configured expected voter role.");
+  }
+
+  if (!role) {
+    throw new Error("The configured expected voter role no longer exists. Run /poll-set-role again.");
+  }
+
+  try {
+    await interaction.guild.members.fetch();
+  } catch (error) {
+    console.error(`Failed to fetch guild members for guild ${config.guildId}:`, error);
+    throw new Error(
+      "Could not fetch role members. Check that the bot can view members and that the Server Members Intent is enabled."
+    );
+  }
+
+  const votedUserIds = new Set(votes.map((vote) => vote.userId));
+  const expectedMembers = role.members.filter((member) => !member.user.bot);
+  const missingMembers = expectedMembers.filter((member) => !votedUserIds.has(member.id));
+
+  return {
+    channel,
+    expectedCount: expectedMembers.size,
+    votedCount: expectedMembers.filter((member) => votedUserIds.has(member.id)).size,
+    missingMembers
+  };
+}
+
+async function fetchCurrentPollMessage(
+  db: PollDatabase,
+  config: PollConfig,
+  channel: NonNullable<Awaited<ReturnType<typeof fetchTextChannel>>>
+): Promise<Message<true>> {
+  try {
+    const message = await channel.messages.fetch(config.currentPollMessageId!);
+    if (!message.poll) {
+      throw new Error("The saved current poll message is not a Discord native poll.");
+    }
+
+    return message;
+  } catch (error) {
+    if (isUnknownMessageError(error)) {
+      db.clearPollVotes(config.guildId, config.currentPollMessageId!);
+      db.clearCurrentPoll(config.guildId);
+      throw new Error("The saved current poll message was deleted. Cleared the saved current poll message ID.");
+    }
+
+    console.error(`Failed to fetch poll message ${config.currentPollMessageId} in guild ${config.guildId}:`, error);
+    throw error instanceof Error ? error : new Error("Could not fetch the current poll message.");
+  }
+}
+
+async function fetchNativePollVotes(message: Message<true>): Promise<Array<{ userId: string; answerId: number }>> {
+  if (!message.poll) {
+    throw new Error("The current message is not a Discord native poll.");
+  }
+
+  const votes: Array<{ userId: string; answerId: number }> = [];
+  const limit = 100;
+
+  try {
+    for (const answerId of message.poll.answers.keys()) {
+      let after: string | undefined;
+      for (;;) {
+        const voters = await message.channel.messages.fetchPollAnswerVoters({ messageId: message.id, answerId, limit, after });
+        for (const user of voters.values()) {
+          votes.push({ userId: user.id, answerId });
+        }
+
+        if (voters.size < limit) {
+          break;
+        }
+
+        after = voters.lastKey();
+        if (!after) {
+          break;
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`Failed to fetch native poll voters for message ${message.id}:`, error);
+    throw new Error("Could not fetch voters from the Discord native poll, so missing voters cannot be calculated safely.");
+  }
+
+  return votes;
+}
+
+function formatMentionList(mentions: string[], label: string): string {
+  if (mentions.length === 0) {
+    return `${label}: none`;
+  }
+
+  const prefix = `${label}: `;
+  const maxLength = 1_950;
+  let content = prefix;
+  let included = 0;
+
+  for (const mention of mentions) {
+    const next = included === 0 ? `${content}${mention}` : `${content} ${mention}`;
+    if (next.length > maxLength) {
+      break;
+    }
+
+    content = next;
+    included += 1;
+  }
+
+  const remaining = mentions.length - included;
+  return remaining > 0 ? `${content}\n...and ${remaining} more.` : content;
+}
+
+function chunkReminderMentions(mentions: string[]): string[] {
+  const prefix = "Reminder: the following members still need to vote in today's poll:";
+  const chunks: string[] = [];
+  let current = prefix;
+
+  for (const mention of mentions) {
+    const next = `${current} ${mention}`;
+    if (next.length > 1_950) {
+      chunks.push(current);
+      current = `${prefix} ${mention}`;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current !== prefix) {
+    chunks.push(current);
+  }
+
+  return chunks;
+}
+
+function isUnknownMessageError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === 10008
+  );
 }
 
 async function registerCommands(): Promise<void> {
