@@ -280,6 +280,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction, db: PollDa
 
   const lines = [
     `Channel: ${config.channelId ? `<#${config.channelId}>` : "not configured"}`,
+    `Schedule paused: ${formatSchedulePause(config)}`,
     `Expected voter role: ${config.expectedRoleId ? `<@&${config.expectedRoleId}>` : "Not set"}`,
     `Question: ${config.question}`,
     `Options: ${config.options.join(", ")}`,
@@ -374,8 +375,17 @@ function formatDate(value: string | null): string {
   return value ? `${value} UTC` : "not scheduled";
 }
 
+function formatSchedulePause(config: PollConfig): string {
+  if (!config.schedulePausedReason) {
+    return "no";
+  }
+
+  const pausedAt = config.schedulePausedAtUtc ? ` at ${formatDate(config.schedulePausedAtUtc)}` : "";
+  return `yes${pausedAt} - ${config.schedulePausedReason} Run /poll-setup with an accessible text channel to resume.`;
+}
+
 interface MissingVoterResult {
-  channel: NonNullable<Awaited<ReturnType<typeof fetchTextChannel>>>;
+  channel: Awaited<ReturnType<typeof fetchTextChannel>>;
   expectedCount: number;
   votedCount: number;
   missingMembers: Role["members"];

@@ -13,6 +13,13 @@ interface ResetPollOptions {
   advanceSchedule?: boolean;
 }
 
+export class PollChannelError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PollChannelError";
+  }
+}
+
 export async function resetPoll(
   client: Client,
   db: PollDatabase,
@@ -20,28 +27,35 @@ export async function resetPoll(
   options: ResetPollOptions = {}
 ): Promise<Message<true>> {
   if (!config.channelId) {
-    throw new Error("Poll channel is not configured.");
+    throw new PollChannelError("Poll channel is not configured.");
   }
 
   const channel = await fetchTextChannel(client, config.channelId);
-  if (!channel) {
-    throw new Error("Configured channel was not found or is not a text channel.");
-  }
 
   if (config.currentPollMessageId) {
     await deleteCurrentPoll(channel, config.currentPollMessageId);
     await db.clearPollVotes(config.guildId, config.currentPollMessageId);
   }
 
-  const message = await channel.send({
-    poll: {
-      question: { text: config.question },
-      answers: config.options.map((option) => ({ text: option })),
-      duration: config.durationHours,
-      allowMultiselect: false,
-      layoutType: PollLayoutType.Default
+  let message: Message;
+  try {
+    message = await channel.send({
+      poll: {
+        question: { text: config.question },
+        answers: config.options.map((option) => ({ text: option })),
+        duration: config.durationHours,
+        allowMultiselect: false,
+        layoutType: PollLayoutType.Default
+      }
+    });
+  } catch (error) {
+    const reason = getPollChannelFailureReason(error);
+    if (reason) {
+      throw new PollChannelError(reason);
     }
-  });
+
+    throw error;
+  }
 
   const postedAt = new Date();
   const nextPostAt =
@@ -70,16 +84,20 @@ export async function deleteSavedPoll(client: Client, db: PollDatabase, config: 
   return deleted;
 }
 
-export async function fetchTextChannel(client: Client, channelId: string): Promise<TextChannel | null> {
+export async function fetchTextChannel(client: Client, channelId: string): Promise<TextChannel> {
   try {
     const channel = await client.channels.fetch(channelId);
-    if (!channel || channel.type !== ChannelType.GuildText) {
-      return null;
+    if (!channel) {
+      throw new PollChannelError("Configured channel was not found.");
+    }
+
+    if (channel.type !== ChannelType.GuildText) {
+      throw new PollChannelError("Configured channel is not a text channel.");
     }
 
     const me = channel.guild.members.me;
     if (!me) {
-      return null;
+      throw new PollChannelError("Bot member could not be found in the configured channel's guild.");
     }
 
     const permissions = channel.permissionsFor(me);
@@ -91,14 +109,47 @@ export async function fetchTextChannel(client: Client, channelId: string): Promi
     ];
 
     if (!permissions || !required.every((permission) => permissions.has(permission))) {
-      throw new Error(`Missing required permissions in #${channel.name}.`);
+      throw new PollChannelError(`Missing required permissions in #${channel.name}.`);
     }
 
     return channel;
   } catch (error) {
-    console.error(`Failed to fetch channel ${channelId}:`, error);
-    return null;
+    const reason = getPollChannelFailureReason(error);
+    if (reason) {
+      throw new PollChannelError(reason);
+    }
+
+    throw error;
   }
+}
+
+export function isPollChannelError(error: unknown): error is PollChannelError {
+  return error instanceof PollChannelError;
+}
+
+function getPollChannelFailureReason(error: unknown): string | null {
+  if (error instanceof PollChannelError) {
+    return error.message;
+  }
+
+  if (hasDiscordErrorCode(error, 50001)) {
+    return "Configured poll channel is inaccessible: Discord returned Missing Access.";
+  }
+
+  if (hasDiscordErrorCode(error, 10003)) {
+    return "Configured poll channel no longer exists: Discord returned Unknown Channel.";
+  }
+
+  return null;
+}
+
+function hasDiscordErrorCode(error: unknown, code: number): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
 }
 
 async function deleteCurrentPoll(channel: TextChannel, messageId: string | null): Promise<boolean> {

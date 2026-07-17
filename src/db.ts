@@ -20,6 +20,9 @@ type ConfigPatch = Partial<{
   current_poll_message_id: string | null;
   last_posted_at_utc: Date | string | null;
   next_post_at_utc: Date | string | null;
+  last_error: string | null;
+  schedule_paused_reason: string | null;
+  schedule_paused_at_utc: Date | string | null;
 }>;
 
 export class PollDatabase {
@@ -49,9 +52,10 @@ export class PollDatabase {
       `INSERT INTO poll_configs (
         guild_id, channel_id, expected_role_id, question, options_json, poll_time_hour_utc,
         frequency_hours, duration_hours, current_poll_message_id,
-        last_posted_at_utc, next_post_at_utc
+        last_posted_at_utc, next_post_at_utc, last_error,
+        schedule_paused_reason, schedule_paused_at_utc
       ) VALUES (
-        $1, NULL, NULL, $2, $3, $4, $5, $6, NULL, NULL, NULL
+        $1, NULL, NULL, $2, $3, $4, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL
       )
       ON CONFLICT (guild_id) DO NOTHING`,
       [
@@ -77,11 +81,17 @@ export class PollDatabase {
     return result.rows[0] ? rowToConfig(result.rows[0]) : null;
   }
 
+  async getAllGuildConfigs(): Promise<PollConfig[]> {
+    const result = await this.pool.query<PollConfigRow>("SELECT * FROM poll_configs ORDER BY guild_id ASC");
+    return result.rows.map(rowToConfig);
+  }
+
   async getDueConfigs(now: Date): Promise<PollConfig[]> {
     const result = await this.pool.query<PollConfigRow>(
       `SELECT * FROM poll_configs
        WHERE channel_id IS NOT NULL
          AND next_post_at_utc IS NOT NULL
+         AND schedule_paused_reason IS NULL
          AND next_post_at_utc <= $1
        ORDER BY next_post_at_utc ASC`,
       [now]
@@ -95,7 +105,10 @@ export class PollDatabase {
     const nextPostAtUtc = config.nextPostAtUtc ?? calculateNextPostAt(new Date(), config.pollTimeHourUtc).toISOString();
     await this.patchConfig(guildId, {
       channel_id: channelId,
-      next_post_at_utc: nextPostAtUtc
+      next_post_at_utc: nextPostAtUtc,
+      last_error: null,
+      schedule_paused_reason: null,
+      schedule_paused_at_utc: null
     });
     return this.getOrCreateGuildConfig(guildId);
   }
@@ -148,7 +161,17 @@ export class PollDatabase {
     await this.patchConfig(guildId, {
       current_poll_message_id: messageId,
       last_posted_at_utc: postedAt,
-      next_post_at_utc: nextPostAt
+      next_post_at_utc: nextPostAt,
+      last_error: null
+    });
+    return this.getOrCreateGuildConfig(guildId);
+  }
+
+  async pauseSchedule(guildId: string, reason: string, pausedAt: Date): Promise<PollConfig> {
+    await this.patchConfig(guildId, {
+      last_error: reason,
+      schedule_paused_reason: reason,
+      schedule_paused_at_utc: pausedAt
     });
     return this.getOrCreateGuildConfig(guildId);
   }
@@ -161,6 +184,29 @@ export class PollDatabase {
 
   async clearPollVotes(guildId: string, pollMessageId: string): Promise<void> {
     await this.pool.query("DELETE FROM poll_votes WHERE guild_id = $1 AND poll_message_id = $2", [guildId, pollMessageId]);
+  }
+
+  async deleteConfig(guildId: string): Promise<void> {
+    await this.pool.query("DELETE FROM poll_configs WHERE guild_id = $1", [guildId]);
+  }
+
+  async deletePollVotesForGuild(guildId: string): Promise<void> {
+    await this.pool.query("DELETE FROM poll_votes WHERE guild_id = $1", [guildId]);
+  }
+
+  async deleteGuildData(guildId: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM poll_votes WHERE guild_id = $1", [guildId]);
+      await client.query("DELETE FROM poll_configs WHERE guild_id = $1", [guildId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async replacePollVotes(guildId: string, pollMessageId: string, votes: Array<{ userId: string; answerId: number }>): Promise<void> {
@@ -221,12 +267,18 @@ export class PollDatabase {
         expected_role_id TEXT,
         last_posted_at_utc TIMESTAMPTZ,
         next_post_at_utc TIMESTAMPTZ,
+        last_error TEXT,
+        schedule_paused_reason TEXT,
+        schedule_paused_at_utc TIMESTAMPTZ,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       )`
     );
 
     await this.pool.query("ALTER TABLE poll_configs ADD COLUMN IF NOT EXISTS expected_role_id TEXT");
+    await this.pool.query("ALTER TABLE poll_configs ADD COLUMN IF NOT EXISTS last_error TEXT");
+    await this.pool.query("ALTER TABLE poll_configs ADD COLUMN IF NOT EXISTS schedule_paused_reason TEXT");
+    await this.pool.query("ALTER TABLE poll_configs ADD COLUMN IF NOT EXISTS schedule_paused_at_utc TIMESTAMPTZ");
 
     await this.pool.query(
       `CREATE TABLE IF NOT EXISTS poll_votes (
@@ -275,6 +327,9 @@ function rowToConfig(row: PollConfigRow): PollConfig {
     currentPollMessageId: row.current_poll_message_id,
     lastPostedAtUtc: formatTimestamp(row.last_posted_at_utc),
     nextPostAtUtc: formatTimestamp(row.next_post_at_utc),
+    lastError: row.last_error,
+    schedulePausedReason: row.schedule_paused_reason,
+    schedulePausedAtUtc: formatTimestamp(row.schedule_paused_at_utc),
     createdAt: formatRequiredTimestamp(row.created_at),
     updatedAt: formatRequiredTimestamp(row.updated_at)
   };

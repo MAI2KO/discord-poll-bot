@@ -1,6 +1,6 @@
 import { Client } from "discord.js";
 import { PollDatabase } from "./db";
-import { resetPoll } from "./polls";
+import { isPollChannelError, resetPoll } from "./polls";
 
 export class PollScheduler {
   private timer: NodeJS.Timeout | null = null;
@@ -44,6 +44,12 @@ export class PollScheduler {
           await resetPoll(this.client, this.db, latest, { advanceSchedule: true });
           console.log(`Posted scheduled poll for guild ${latest.guildId}.`);
         } catch (error) {
+          if (isPollChannelError(error)) {
+            await this.db.pauseSchedule(latest.guildId, error.message, new Date());
+            console.warn(`Paused scheduled polls for guild ${latest.guildId}: ${error.message}`);
+            continue;
+          }
+
           console.error(`Failed to post scheduled poll for guild ${latest.guildId}:`, error);
         }
       }

@@ -19,6 +19,9 @@ export interface PollConfig {
   currentPollMessageId: string | null;
   lastPostedAtUtc: string | null;
   nextPostAtUtc: string | null;
+  lastError: string | null;
+  schedulePausedReason: string | null;
+  schedulePausedAtUtc: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -35,6 +38,9 @@ export interface PollConfigRow {
   current_poll_message_id: string | null;
   last_posted_at_utc: Date | string | null;
   next_post_at_utc: Date | string | null;
+  last_error: string | null;
+  schedule_paused_reason: string | null;
+  schedule_paused_at_utc: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }

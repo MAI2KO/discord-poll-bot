@@ -112,7 +112,7 @@ Run these in Discord after commands are registered:
 - `/poll-set-role` sets the role whose non-bot members are expected to vote.
 - `/poll-post-now` deletes the previous poll and posts a fresh one immediately.
 - `/poll-delete` deletes the current poll and clears the saved message ID.
-- `/poll-status` shows the saved config, next post time, and any duration/frequency warning.
+- `/poll-status` shows the saved config, schedule pause state, next post time, and any duration/frequency warning.
 - `/poll-missing` privately shows total expected voters, total voted, total missing, and the missing member mentions.
 - `/poll-remind-missing` posts a public reminder in the poll channel tagging only missing voters.
 - `/poll-clear-tracking` clears stored voter tracking rows for the current poll.
@@ -170,4 +170,6 @@ The bot creates the `poll_configs` and `poll_votes` tables automatically on star
 
 The scheduler runs in UTC and checks every minute for configs where `next_post_at_utc` is due. After a poll is posted, the next post time is advanced by `frequency_hours`.
 
-If the bot lacks channel permissions, the channel is deleted, or the previous poll is missing, the bot logs the issue and continues running.
+If the configured channel is deleted, inaccessible, missing permissions, or no longer a text channel, the bot pauses scheduled posting for that server and records the reason. `/poll-status` shows the pause, and `/poll-setup` with an accessible text channel clears it. `/poll-post-now` still tries manually and reports any posting error privately.
+
+On startup, the bot deletes saved poll data for servers it is no longer in. It also deletes a server's saved config and vote tracking when the bot is removed from that server.

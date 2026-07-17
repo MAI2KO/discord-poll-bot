@@ -22,9 +22,19 @@ const client = new Client({
 
 const scheduler = new PollScheduler(client, db);
 
-client.once(Events.ClientReady, (readyClient) => {
+client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}.`);
+  await cleanupStaleGuildData();
   scheduler.start();
+});
+
+client.on(Events.GuildDelete, async (guild) => {
+  try {
+    await db.deleteGuildData(guild.id);
+    console.log(`Deleted config for guild ${guild.id} after bot was removed from the guild.`);
+  } catch (error) {
+    console.error(`Failed to delete config for guild ${guild.id} after bot was removed from the guild:`, error);
+  }
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -44,6 +54,29 @@ function shutdown(): void {
   void db.close().finally(() => {
     process.exit(0);
   });
+}
+
+async function cleanupStaleGuildData(): Promise<void> {
+  let configs;
+  try {
+    configs = await db.getAllGuildConfigs();
+  } catch (error) {
+    console.error("Failed to fetch saved guild configs for startup cleanup:", error);
+    return;
+  }
+
+  for (const config of configs) {
+    if (client.guilds.cache.has(config.guildId)) {
+      continue;
+    }
+
+    try {
+      await db.deleteGuildData(config.guildId);
+      console.log(`Cleaned up stale config for guild ${config.guildId} because the bot is no longer in that guild.`);
+    } catch (error) {
+      console.error(`Failed to clean up stale config for guild ${config.guildId}:`, error);
+    }
+  }
 }
 
 async function main(): Promise<void> {
